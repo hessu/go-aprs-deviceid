@@ -6,7 +6,6 @@ package deviceid
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/hessu/go-aprs-fap"
@@ -26,10 +25,10 @@ type DeviceID struct {
 
 // DB holds the parsed tocalls.yaml database and lookup structures.
 type DB struct {
-	fixedTocalls  map[string]*tocallEntry
-	regexpTocalls map[string][]*regexpTocall // keyed by prefix (2-5 chars)
-	miceCodes     map[string]*miceEntry
-	miceLegacy    []miceLegacyEntry
+	fixedTocalls    map[string]*tocallEntry
+	wildcardTocalls map[string][]*wildcardTocall // keyed by prefix (2-5 chars)
+	miceCodes       map[string]*miceEntry
+	miceLegacy      []miceLegacyEntry
 }
 
 type tocallEntry struct {
@@ -40,9 +39,9 @@ type tocallEntry struct {
 	Features []string `yaml:"features"`
 }
 
-type regexpTocall struct {
-	re    *regexp.Regexp
-	entry *tocallEntry
+type wildcardTocall struct {
+	pattern string // original pattern string (e.g. "APDnnn", "APnnnU")
+	entry   *tocallEntry
 }
 
 type miceEntry struct {
@@ -94,62 +93,52 @@ func isExact(s string) bool {
 	return true
 }
 
-// tocallToRegexp converts a tocall wildcard pattern to a regexp.
-// Wildcards: n → \d, ? → ., * → .*
-// The wildcard portion is captured in a group for version extraction.
-// Literal characters after wildcards are placed outside the capture group.
-func tocallToRegexp(pattern string) (*regexp.Regexp, error) {
-	// Split into: prefix (literal), wild (wildcards), suffix (literal after wildcards)
-	var prefix strings.Builder
-	var wild strings.Builder
-	var suffix strings.Builder
-	phase := 0 // 0=prefix, 1=wild, 2=suffix
+// matchWildcard matches a tocall string against a wildcard pattern.
+// Returns (matched, versionStr). The version is the substring matched
+// by wildcard characters (n, ?, *). Wildcards:
+//
+//	n → matches a digit [0-9]
+//	? → matches any single character
+//	* → matches zero or more characters (greedy, only at end of pattern)
+func matchWildcard(pattern, s string) (bool, string) {
+	// '*' is only supported at the end of the pattern
+	if strings.HasSuffix(pattern, "*") {
+		prefix := pattern[:len(pattern)-1]
+		if len(s) < len(prefix) {
+			return false, ""
+		}
+		// Match the prefix portion
+		ok, ver := matchWildcard(prefix, s[:len(prefix)])
+		if !ok {
+			return false, ""
+		}
+		// The '*' match plus any remaining chars form the version
+		return true, ver + s[len(prefix):]
+	}
 
-	for _, c := range pattern {
-		isWild := c == 'n' || c == '?' || c == '*'
-		switch {
-		case phase == 0 && !isWild:
-			prefix.WriteRune(c)
-		case phase == 0 && isWild:
-			phase = 1
-			fallthrough
-		case phase == 1 && isWild:
-			switch c {
-			case 'n':
-				wild.WriteString(`\d`)
-			case '?':
-				wild.WriteByte('.')
-			case '*':
-				wild.WriteString(`.*`)
+	if len(pattern) != len(s) {
+		return false, ""
+	}
+
+	var version strings.Builder
+	for i := 0; i < len(pattern); i++ {
+		pc := pattern[i]
+		sc := s[i]
+		switch pc {
+		case 'n':
+			if sc < '0' || sc > '9' {
+				return false, ""
 			}
-		case phase == 1 && !isWild:
-			phase = 2
-			fallthrough
-		case phase == 2:
-			if isWild {
-				// More wildcards after literal suffix - unusual, but handle
-				switch c {
-				case 'n':
-					suffix.WriteString(`\d`)
-				case '?':
-					suffix.WriteByte('.')
-				case '*':
-					suffix.WriteString(`.*`)
-				}
-			} else {
-				suffix.WriteString(regexp.QuoteMeta(string(c)))
+			version.WriteByte(sc)
+		case '?':
+			version.WriteByte(sc)
+		default:
+			if pc != sc {
+				return false, ""
 			}
 		}
 	}
-
-	var reStr string
-	if wild.Len() > 0 {
-		reStr = `^` + regexp.QuoteMeta(prefix.String()) + `(` + wild.String() + `)` + suffix.String() + `$`
-	} else {
-		reStr = `^` + regexp.QuoteMeta(prefix.String()) + `$`
-	}
-
-	return regexp.Compile(reStr)
+	return true, version.String()
 }
 
 // prefixLen returns the length of the fixed prefix (before any wildcards).
@@ -175,10 +164,10 @@ func LoadDB(yamlPath string) (*DB, error) {
 	}
 
 	db := &DB{
-		fixedTocalls:  make(map[string]*tocallEntry),
-		regexpTocalls: make(map[string][]*regexpTocall),
-		miceCodes:     make(map[string]*miceEntry),
-		miceLegacy:    yf.MiceLegacy,
+		fixedTocalls:    make(map[string]*tocallEntry),
+		wildcardTocalls: make(map[string][]*wildcardTocall),
+		miceCodes:       make(map[string]*miceEntry),
+		miceLegacy:      yf.MiceLegacy,
 	}
 
 	// Process tocalls
@@ -194,15 +183,11 @@ func LoadDB(yamlPath string) (*DB, error) {
 		if isExact(t.Tocall) {
 			db.fixedTocalls[t.Tocall] = entry
 		} else {
-			re, err := tocallToRegexp(t.Tocall)
-			if err != nil {
-				return nil, fmt.Errorf("compiling tocall pattern %q: %w", t.Tocall, err)
-			}
 			plen := prefixLen(t.Tocall)
 			prefix := t.Tocall[:plen]
-			db.regexpTocalls[prefix] = append(db.regexpTocalls[prefix], &regexpTocall{
-				re:    re,
-				entry: entry,
+			db.wildcardTocalls[prefix] = append(db.wildcardTocalls[prefix], &wildcardTocall{
+				pattern: t.Tocall,
+				entry:   entry,
 			})
 		}
 	}
@@ -219,17 +204,6 @@ func LoadDB(yamlPath string) (*DB, error) {
 
 	return db, nil
 }
-
-// Mic-E legacy device patterns
-var (
-	reLegacyD72  = regexp.MustCompile(`^>(.*?)=$`)
-	reLegacyD74  = regexp.MustCompile(`^>(.*?)\^$`)
-	reLegacyD7   = regexp.MustCompile(`^>`)
-	reLegacyD710 = regexp.MustCompile(`^\](.*?)=$`)
-	reLegacyD700 = regexp.MustCompile(`^\]`)
-	reLegacyVX8  = regexp.MustCompile("^`.*_\\s*$")
-	reNewMicE    = regexp.MustCompile("^([`'])(.*)(..)[|>]?$")
-)
 
 // Identify determines the device that transmitted the given packet.
 // Returns (deviceID, updatedComment, error).
@@ -262,15 +236,10 @@ func (db *DB) Identify(p *fap.Packet) (*DeviceID, string, error) {
 			continue
 		}
 		prefix := dst[:plen]
-		if rts, ok := db.regexpTocalls[prefix]; ok {
-			for _, rt := range rts {
-				m := rt.re.FindStringSubmatch(dst)
-				if m != nil {
-					version := ""
-					if len(m) > 1 {
-						version = m[1]
-					}
-					return entryToDeviceID(rt.entry, version), comment, nil
+		if wts, ok := db.wildcardTocalls[prefix]; ok {
+			for _, wt := range wts {
+				if matched, version := matchWildcard(wt.pattern, dst); matched {
+					return entryToDeviceID(wt.entry, version), comment, nil
 				}
 			}
 		}
