@@ -27,43 +27,29 @@ type DeviceID struct {
 
 // DB holds the parsed tocalls.yaml database and lookup structures.
 type DB struct {
-	fixedTocalls    map[string]*tocallEntry
+	fixedTocalls    map[string]*DeviceID
 	wildcardTocalls map[string][]wildcardTocall // keyed by prefix (2-5 chars)
-	miceCodes       map[string]*miceEntry
+	miceCodes       map[string]*miceDeviceIDs
 	miceLegacySuf   []miceLegacyEntry // entries with both prefix and suffix
 	miceLegacyPre   []miceLegacyEntry // entries with prefix only
 }
 
-type tocallEntry struct {
-	Vendor    string
-	Model     string
-	Class     string
-	OS        string
-	Features  []string
-	Messaging bool
-}
-
 type wildcardTocall struct {
 	pattern string // original pattern string (e.g. "APDnnn", "APnnnU")
-	entry   *tocallEntry
-}
-
-type miceEntry struct {
-	Vendor    string
-	Model     string
-	Class     string
-	Features  []string
-	Messaging bool
+	id      *DeviceID
 }
 
 type miceLegacyEntry struct {
-	Prefix    string
-	Suffix    string
-	Vendor    string
-	Model     string
-	Class     string
-	Features  []string
-	Messaging bool
+	Prefix byte
+	Suffix byte // 0 if prefix-only
+	id     *DeviceID
+}
+
+// miceDeviceIDs holds two precomputed DeviceIDs for new-style Mic-E codes,
+// since the Messaging flag depends on the runtime prefix character.
+type miceDeviceIDs struct {
+	withMsg    DeviceID
+	withoutMsg DeviceID
 }
 
 type yamlTocall struct {
@@ -177,14 +163,14 @@ func LoadDB(yamlPath string) (*DB, error) {
 	}
 
 	db := &DB{
-		fixedTocalls:    make(map[string]*tocallEntry, len(yf.Tocalls)),
+		fixedTocalls:    make(map[string]*DeviceID, len(yf.Tocalls)),
 		wildcardTocalls: make(map[string][]wildcardTocall),
-		miceCodes:       make(map[string]*miceEntry, len(yf.Mice)),
+		miceCodes:       make(map[string]*miceDeviceIDs, len(yf.Mice)),
 	}
 
 	// Process tocalls
 	for _, t := range yf.Tocalls {
-		entry := &tocallEntry{
+		did := &DeviceID{
 			Vendor:    t.Vendor,
 			Model:     t.Model,
 			Class:     t.Class,
@@ -194,40 +180,48 @@ func LoadDB(yamlPath string) (*DB, error) {
 		}
 
 		if isExact(t.Tocall) {
-			db.fixedTocalls[t.Tocall] = entry
+			db.fixedTocalls[t.Tocall] = did
 		} else {
 			plen := prefixLen(t.Tocall)
 			prefix := t.Tocall[:plen]
 			db.wildcardTocalls[prefix] = append(db.wildcardTocalls[prefix], wildcardTocall{
 				pattern: t.Tocall,
-				entry:   entry,
+				id:      did,
 			})
 		}
 	}
 
-	// Process mice
+	// Process mice — precompute both messaging variants
 	for _, m := range yf.Mice {
-		db.miceCodes[m.Suffix] = &miceEntry{
-			Vendor:    m.Vendor,
-			Model:     m.Model,
-			Class:     m.Class,
-			Features:  m.Features,
-			Messaging: hasFeature(m.Features, "messaging"),
+		base := DeviceID{
+			Vendor:   m.Vendor,
+			Model:    m.Model,
+			Class:    m.Class,
+			Features: m.Features,
 		}
+		ids := &miceDeviceIDs{withoutMsg: base, withMsg: base}
+		ids.withMsg.Messaging = true
+		if hasFeature(m.Features, "messaging") {
+			ids.withoutMsg.Messaging = true
+		}
+		db.miceCodes[m.Suffix] = ids
 	}
 
 	// Process mic-e legacy — split into suffix and prefix-only slices
 	for _, m := range yf.MiceLegacy {
-		e := miceLegacyEntry{
-			Prefix:    m.Prefix,
-			Suffix:    m.Suffix,
+		did := &DeviceID{
 			Vendor:    m.Vendor,
 			Model:     m.Model,
 			Class:     m.Class,
 			Features:  m.Features,
 			Messaging: hasFeature(m.Features, "messaging"),
 		}
+		e := miceLegacyEntry{id: did}
+		if len(m.Prefix) > 0 {
+			e.Prefix = m.Prefix[0]
+		}
 		if m.Suffix != "" {
+			e.Suffix = m.Suffix[0]
 			db.miceLegacySuf = append(db.miceLegacySuf, e)
 		} else {
 			db.miceLegacyPre = append(db.miceLegacyPre, e)
@@ -257,8 +251,8 @@ func (db *DB) Identify(p *fap.Packet) (*DeviceID, string, error) {
 	}
 
 	// Exact tocall match
-	if entry, ok := db.fixedTocalls[p.DstCallsign]; ok {
-		return entryToDeviceID(entry), comment, nil
+	if did, ok := db.fixedTocalls[p.DstCallsign]; ok {
+		return did, comment, nil
 	}
 
 	// Wildcard tocall match - try prefix lengths 5, 4, 3, 2
@@ -271,7 +265,7 @@ func (db *DB) Identify(p *fap.Packet) (*DeviceID, string, error) {
 		if wts, ok := db.wildcardTocalls[prefix]; ok {
 			for i := range wts {
 				if matchWildcard(wts[i].pattern, dst) {
-					return entryToDeviceID(wts[i].entry), comment, nil
+					return wts[i].id, comment, nil
 				}
 			}
 		}
@@ -282,82 +276,41 @@ func (db *DB) Identify(p *fap.Packet) (*DeviceID, string, error) {
 
 func (db *DB) identifyMicE(p *fap.Packet) (*DeviceID, string) {
 	comment := p.Comment
+	if len(comment) < 1 {
+		return nil, comment
+	}
+
+	first := comment[0]
 
 	// Try legacy Mic-E patterns with both prefix and suffix
 	for i := range db.miceLegacySuf {
 		leg := &db.miceLegacySuf[i]
-		if len(comment) < len(leg.Prefix)+len(leg.Suffix) {
+		if len(comment) < 2 || first != leg.Prefix || comment[len(comment)-1] != leg.Suffix {
 			continue
 		}
-		if comment[0] != leg.Prefix[0] {
-			continue
-		}
-		if comment[len(comment)-1] != leg.Suffix[len(leg.Suffix)-1] {
-			continue
-		}
-		if len(leg.Prefix) > 1 && comment[:len(leg.Prefix)] != leg.Prefix {
-			continue
-		}
-		if len(leg.Suffix) > 1 && comment[len(comment)-len(leg.Suffix):] != leg.Suffix {
-			continue
-		}
-		stripped := comment[len(leg.Prefix) : len(comment)-len(leg.Suffix)]
-		return &DeviceID{
-			Vendor:    leg.Vendor,
-			Model:     leg.Model,
-			Class:     leg.Class,
-			Features:  leg.Features,
-			Messaging: leg.Messaging,
-		}, stripped
+		return leg.id, comment[1 : len(comment)-1]
 	}
 
 	// Try legacy prefix-only matches
 	for i := range db.miceLegacyPre {
 		leg := &db.miceLegacyPre[i]
-		if len(comment) < len(leg.Prefix) {
+		if first != leg.Prefix {
 			continue
 		}
-		if comment[0] != leg.Prefix[0] {
-			continue
-		}
-		if len(leg.Prefix) > 1 && comment[:len(leg.Prefix)] != leg.Prefix {
-			continue
-		}
-		stripped := comment[len(leg.Prefix):]
-		return &DeviceID{
-			Vendor:    leg.Vendor,
-			Model:     leg.Model,
-			Class:     leg.Class,
-			Features:  leg.Features,
-			Messaging: leg.Messaging,
-		}, stripped
+		return leg.id, comment[1:]
 	}
 
 	// Try new-style Mic-E: 2-char suffix lookup
 	if len(comment) >= 2 {
-		prefix := comment[0]
 		suffix := comment[len(comment)-2:]
-		if me, ok := db.miceCodes[suffix]; ok {
-			return &DeviceID{
-				Vendor:    me.Vendor,
-				Model:     me.Model,
-				Class:     me.Class,
-				Features:  me.Features,
-				Messaging: prefix == '`' || me.Messaging,
-			}, comment[:len(comment)-2]
+		if ids, ok := db.miceCodes[suffix]; ok {
+			if first == '`' {
+				return &ids.withMsg, comment[:len(comment)-2]
+			}
+			return &ids.withoutMsg, comment[:len(comment)-2]
 		}
 	}
 
 	return nil, comment
 }
 
-func entryToDeviceID(e *tocallEntry) *DeviceID {
-	return &DeviceID{
-		Vendor:    e.Vendor,
-		Model:     e.Model,
-		Class:     e.Class,
-		OS:        e.OS,
-		Features:  e.Features,
-		Messaging: e.Messaging,
-	}
-}
