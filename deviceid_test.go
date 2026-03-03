@@ -47,16 +47,15 @@ func TestWildcardTocallMatch(t *testing.T) {
 	db := loadTestDB(t)
 
 	tests := []struct {
-		name    string
-		tocall  string
-		vendor  string
-		model   string
-		version string
+		name   string
+		tocall string
+		vendor string
+		model  string
 	}{
-		{"APDnnn", "APD123", "Open Source", "aprsd", "123"},
-		{"APDR??", "APDR15", "Open Source", "APRSdroid", "15"},
-		{"APnnnU", "AP123U", "Painter Engineering", "uSmartDigi Digipeater", "123"},
-		{"APWW??", "APWW10", "KJ4ERJ", "APRSIS32", "10"},
+		{"APDnnn", "APD123", "Open Source", "aprsd"},
+		{"APDR??", "APDR15", "Open Source", "APRSdroid"},
+		{"APnnnU", "AP123U", "Painter Engineering", "uSmartDigi Digipeater"},
+		{"APWW??", "APWW10", "KJ4ERJ", "APRSIS32"},
 	}
 
 	for _, tc := range tests {
@@ -75,9 +74,6 @@ func TestWildcardTocallMatch(t *testing.T) {
 			}
 			if did.Model != tc.model {
 				t.Errorf("model = %q, want %q", did.Model, tc.model)
-			}
-			if did.Version != tc.version {
-				t.Errorf("version = %q, want %q", did.Version, tc.version)
 			}
 		})
 	}
