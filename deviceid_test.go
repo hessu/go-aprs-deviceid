@@ -6,7 +6,7 @@ import (
 	"github.com/hessu/go-aprs-fap"
 )
 
-const testDBPath = "tocalls.yaml"
+const testDBPath = "testdata/tocalls.yaml"
 
 func loadTestDB(t *testing.T) *DB {
 	t.Helper()
