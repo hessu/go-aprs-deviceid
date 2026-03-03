@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
+	"syscall"
 
 	"github.com/hessu/go-aprs-fap"
 	"gopkg.in/yaml.v3"
@@ -25,8 +27,19 @@ type DeviceID struct {
 	Messaging bool     // Device supports APRS messaging
 }
 
-// DB holds the parsed tocalls.yaml database and lookup structures.
-type DB struct {
+// DeviceDB is a concurrency-safe device identification database that
+// supports hot-reloading. Use Open to create one, then call Identify
+// from any number of goroutines. Call CheckReload periodically to
+// pick up changes to the underlying YAML file.
+type DeviceDB struct {
+	path string
+	ino  uint64
+	mtime syscall.Timespec
+	db   atomic.Pointer[db]
+}
+
+// db holds the parsed tocalls.yaml lookup structures. Immutable after construction.
+type db struct {
 	fixedTocalls    map[string]*DeviceID
 	wildcardTocalls map[string][]wildcardTocall // keyed by prefix (2-5 chars)
 	miceCodes       map[string]*miceDeviceIDs
@@ -150,8 +163,57 @@ func hasFeature(features []string, f string) bool {
 	return false
 }
 
-// LoadDB loads and parses a tocalls.yaml file, building lookup structures.
-func LoadDB(yamlPath string) (*DB, error) {
+// Open loads a tocalls.yaml file and returns a DeviceDB ready for concurrent use.
+// Call Identify to look up devices, and CheckReload to pick up file changes.
+func Open(yamlPath string) (*DeviceDB, error) {
+	ddb := &DeviceDB{path: yamlPath}
+	if err := ddb.load(); err != nil {
+		return nil, err
+	}
+	return ddb, nil
+}
+
+// load reads and parses the YAML file, updates the stored inode/mtime,
+// and atomically swaps in the new db.
+func (ddb *DeviceDB) load() error {
+	var st syscall.Stat_t
+	if err := syscall.Stat(ddb.path, &st); err != nil {
+		return fmt.Errorf("stat %s: %w", ddb.path, err)
+	}
+
+	d, err := loadDB(ddb.path)
+	if err != nil {
+		return err
+	}
+
+	ddb.ino = st.Ino
+	ddb.mtime = st.Mtim
+	ddb.db.Store(d)
+	return nil
+}
+
+// CheckReload checks whether the database file has changed (by comparing
+// inode and mtime) and reloads it if so. Returns true if the database was
+// reloaded. It is safe to call from a single goroutine while other
+// goroutines call Identify concurrently.
+func (ddb *DeviceDB) CheckReload() (bool, error) {
+	var st syscall.Stat_t
+	if err := syscall.Stat(ddb.path, &st); err != nil {
+		return false, fmt.Errorf("stat %s: %w", ddb.path, err)
+	}
+
+	if st.Ino == ddb.ino && st.Mtim == ddb.mtime {
+		return false, nil
+	}
+
+	if err := ddb.load(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// loadDB reads and parses a tocalls.yaml file, building lookup structures.
+func loadDB(yamlPath string) (*db, error) {
 	data, err := os.ReadFile(yamlPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading tocalls.yaml: %w", err)
@@ -162,7 +224,7 @@ func LoadDB(yamlPath string) (*DB, error) {
 		return nil, fmt.Errorf("parsing tocalls.yaml: %w", err)
 	}
 
-	db := &DB{
+	d := &db{
 		fixedTocalls:    make(map[string]*DeviceID, len(yf.Tocalls)),
 		wildcardTocalls: make(map[string][]wildcardTocall),
 		miceCodes:       make(map[string]*miceDeviceIDs, len(yf.Mice)),
@@ -180,11 +242,11 @@ func LoadDB(yamlPath string) (*DB, error) {
 		}
 
 		if isExact(t.Tocall) {
-			db.fixedTocalls[t.Tocall] = did
+			d.fixedTocalls[t.Tocall] = did
 		} else {
 			plen := prefixLen(t.Tocall)
 			prefix := t.Tocall[:plen]
-			db.wildcardTocalls[prefix] = append(db.wildcardTocalls[prefix], wildcardTocall{
+			d.wildcardTocalls[prefix] = append(d.wildcardTocalls[prefix], wildcardTocall{
 				pattern: t.Tocall,
 				id:      did,
 			})
@@ -204,7 +266,7 @@ func LoadDB(yamlPath string) (*DB, error) {
 		if hasFeature(m.Features, "messaging") {
 			ids.withoutMsg.Messaging = true
 		}
-		db.miceCodes[m.Suffix] = ids
+		d.miceCodes[m.Suffix] = ids
 	}
 
 	// Process mic-e legacy — split into suffix and prefix-only slices
@@ -222,20 +284,25 @@ func LoadDB(yamlPath string) (*DB, error) {
 		}
 		if m.Suffix != "" {
 			e.Suffix = m.Suffix[0]
-			db.miceLegacySuf = append(db.miceLegacySuf, e)
+			d.miceLegacySuf = append(d.miceLegacySuf, e)
 		} else {
-			db.miceLegacyPre = append(db.miceLegacyPre, e)
+			d.miceLegacyPre = append(d.miceLegacyPre, e)
 		}
 	}
 
-	return db, nil
+	return d, nil
 }
 
 // Identify determines the device that transmitted the given packet.
+// It is safe to call concurrently from multiple goroutines.
 // Returns (deviceID, updatedComment, error).
 // updatedComment has Mic-E device codes stripped from the comment.
 // Returns nil DeviceID and ErrNoMatch if no match is found.
-func (db *DB) Identify(p *fap.Packet) (*DeviceID, string, error) {
+func (ddb *DeviceDB) Identify(p *fap.Packet) (*DeviceID, string, error) {
+	return ddb.db.Load().identify(p)
+}
+
+func (d *db) identify(p *fap.Packet) (*DeviceID, string, error) {
 	if p.Format == "" && p.DstCallsign == "" {
 		return nil, p.Comment, fmt.Errorf("packet has no format or destination callsign")
 	}
@@ -244,14 +311,14 @@ func (db *DB) Identify(p *fap.Packet) (*DeviceID, string, error) {
 
 	// Mic-E format
 	if p.Format == fap.FormatMicE {
-		did, updatedComment := db.identifyMicE(p)
+		did, updatedComment := d.identifyMicE(p)
 		if did != nil {
 			return did, updatedComment, nil
 		}
 	}
 
 	// Exact tocall match
-	if did, ok := db.fixedTocalls[p.DstCallsign]; ok {
+	if did, ok := d.fixedTocalls[p.DstCallsign]; ok {
 		return did, comment, nil
 	}
 
@@ -262,7 +329,7 @@ func (db *DB) Identify(p *fap.Packet) (*DeviceID, string, error) {
 			continue
 		}
 		prefix := dst[:plen]
-		if wts, ok := db.wildcardTocalls[prefix]; ok {
+		if wts, ok := d.wildcardTocalls[prefix]; ok {
 			for i := range wts {
 				if matchWildcard(wts[i].pattern, dst) {
 					return wts[i].id, comment, nil
@@ -274,7 +341,7 @@ func (db *DB) Identify(p *fap.Packet) (*DeviceID, string, error) {
 	return nil, comment, ErrNoMatch
 }
 
-func (db *DB) identifyMicE(p *fap.Packet) (*DeviceID, string) {
+func (d *db) identifyMicE(p *fap.Packet) (*DeviceID, string) {
 	comment := p.Comment
 	if len(comment) < 1 {
 		return nil, comment
@@ -283,8 +350,8 @@ func (db *DB) identifyMicE(p *fap.Packet) (*DeviceID, string) {
 	first := comment[0]
 
 	// Try legacy Mic-E patterns with both prefix and suffix
-	for i := range db.miceLegacySuf {
-		leg := &db.miceLegacySuf[i]
+	for i := range d.miceLegacySuf {
+		leg := &d.miceLegacySuf[i]
 		if len(comment) < 2 || first != leg.Prefix || comment[len(comment)-1] != leg.Suffix {
 			continue
 		}
@@ -292,8 +359,8 @@ func (db *DB) identifyMicE(p *fap.Packet) (*DeviceID, string) {
 	}
 
 	// Try legacy prefix-only matches
-	for i := range db.miceLegacyPre {
-		leg := &db.miceLegacyPre[i]
+	for i := range d.miceLegacyPre {
+		leg := &d.miceLegacyPre[i]
 		if first != leg.Prefix {
 			continue
 		}
@@ -303,7 +370,7 @@ func (db *DB) identifyMicE(p *fap.Packet) (*DeviceID, string) {
 	// Try new-style Mic-E: 2-char suffix lookup
 	if len(comment) >= 2 {
 		suffix := comment[len(comment)-2:]
-		if ids, ok := db.miceCodes[suffix]; ok {
+		if ids, ok := d.miceCodes[suffix]; ok {
 			if first == '`' {
 				return &ids.withMsg, comment[:len(comment)-2]
 			}
@@ -313,4 +380,3 @@ func (db *DB) identifyMicE(p *fap.Packet) (*DeviceID, string) {
 
 	return nil, comment
 }
-

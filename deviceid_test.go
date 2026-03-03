@@ -1,6 +1,8 @@
 package deviceid
 
 import (
+	"errors"
+	"os"
 	"testing"
 
 	"github.com/hessu/go-aprs-fap"
@@ -8,24 +10,24 @@ import (
 
 const testDBPath = "testdata/tocalls.yaml"
 
-func loadTestDB(t *testing.T) *DB {
+func openTestDB(t *testing.T) *DeviceDB {
 	t.Helper()
-	db, err := LoadDB(testDBPath)
+	ddb, err := Open(testDBPath)
 	if err != nil {
-		t.Fatalf("LoadDB failed: %v", err)
+		t.Fatalf("Open failed: %v", err)
 	}
-	return db
+	return ddb
 }
 
 func TestExactTocallMatch(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		DstCallsign: "APZMDR",
 		Format:      fap.FormatUncompressed,
 	}
 
-	did, _, err := db.Identify(p)
+	did, _, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -44,7 +46,7 @@ func TestExactTocallMatch(t *testing.T) {
 }
 
 func TestWildcardTocallMatch(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	tests := []struct {
 		name   string
@@ -65,7 +67,7 @@ func TestWildcardTocallMatch(t *testing.T) {
 				Format:      fap.FormatUncompressed,
 			}
 
-			did, _, err := db.Identify(p)
+			did, _, err := ddb.Identify(p)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -80,14 +82,14 @@ func TestWildcardTocallMatch(t *testing.T) {
 }
 
 func TestWildcardWithFeatures(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		DstCallsign: "APWW10",
 		Format:      fap.FormatUncompressed,
 	}
 
-	did, _, err := db.Identify(p)
+	did, _, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,7 +102,7 @@ func TestWildcardWithFeatures(t *testing.T) {
 }
 
 func TestMicELegacyKenwoodD7(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		Format:      fap.FormatMicE,
@@ -108,7 +110,7 @@ func TestMicELegacyKenwoodD7(t *testing.T) {
 		Comment:     ">hello",
 	}
 
-	did, comment, err := db.Identify(p)
+	did, comment, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -130,7 +132,7 @@ func TestMicELegacyKenwoodD7(t *testing.T) {
 }
 
 func TestMicELegacyKenwoodD72(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		Format:      fap.FormatMicE,
@@ -138,7 +140,7 @@ func TestMicELegacyKenwoodD72(t *testing.T) {
 		Comment:     ">some text=",
 	}
 
-	did, comment, err := db.Identify(p)
+	did, comment, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -151,7 +153,7 @@ func TestMicELegacyKenwoodD72(t *testing.T) {
 }
 
 func TestMicELegacyKenwoodD74(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		Format:      fap.FormatMicE,
@@ -159,7 +161,7 @@ func TestMicELegacyKenwoodD74(t *testing.T) {
 		Comment:     ">some text^",
 	}
 
-	did, comment, err := db.Identify(p)
+	did, comment, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +174,7 @@ func TestMicELegacyKenwoodD74(t *testing.T) {
 }
 
 func TestMicELegacyKenwoodD700(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		Format:      fap.FormatMicE,
@@ -180,7 +182,7 @@ func TestMicELegacyKenwoodD700(t *testing.T) {
 		Comment:     "]hello world",
 	}
 
-	did, comment, err := db.Identify(p)
+	did, comment, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -193,7 +195,7 @@ func TestMicELegacyKenwoodD700(t *testing.T) {
 }
 
 func TestMicELegacyKenwoodD710(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		Format:      fap.FormatMicE,
@@ -201,7 +203,7 @@ func TestMicELegacyKenwoodD710(t *testing.T) {
 		Comment:     "]some text=",
 	}
 
-	did, comment, err := db.Identify(p)
+	did, comment, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -214,7 +216,7 @@ func TestMicELegacyKenwoodD710(t *testing.T) {
 }
 
 func TestMicENewStyleSuffix(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	tests := []struct {
 		name      string
@@ -236,7 +238,7 @@ func TestMicENewStyleSuffix(t *testing.T) {
 				Comment:     tc.comment,
 			}
 
-			did, _, err := db.Identify(p)
+			did, _, err := ddb.Identify(p)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -254,7 +256,7 @@ func TestMicENewStyleSuffix(t *testing.T) {
 }
 
 func TestMicECommentStripping(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		Format:      fap.FormatMicE,
@@ -262,7 +264,7 @@ func TestMicECommentStripping(t *testing.T) {
 		Comment:     "`hello world|4",
 	}
 
-	did, comment, err := db.Identify(p)
+	did, comment, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -275,16 +277,16 @@ func TestMicECommentStripping(t *testing.T) {
 }
 
 func TestNoMatch(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	p := &fap.Packet{
 		DstCallsign: "ZZZZZ9",
 		Format:      fap.FormatUncompressed,
 	}
 
-	did, _, err := db.Identify(p)
-	if err == nil {
-		t.Fatal("expected error for unknown tocall")
+	did, _, err := ddb.Identify(p)
+	if !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("expected ErrNoMatch, got %v", err)
 	}
 	if did != nil {
 		t.Errorf("expected nil DeviceID, got %+v", did)
@@ -292,7 +294,7 @@ func TestNoMatch(t *testing.T) {
 }
 
 func TestMicEFallbackToTocall(t *testing.T) {
-	db := loadTestDB(t)
+	ddb := openTestDB(t)
 
 	// Mic-E format but comment doesn't match any Mic-E device code;
 	// should fall back to tocall matching
@@ -302,7 +304,7 @@ func TestMicEFallbackToTocall(t *testing.T) {
 		Comment:     "xy",
 	}
 
-	did, _, err := db.Identify(p)
+	did, _, err := ddb.Identify(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -311,9 +313,87 @@ func TestMicEFallbackToTocall(t *testing.T) {
 	}
 }
 
-func TestLoadDBFileNotFound(t *testing.T) {
-	_, err := LoadDB("nonexistent.yaml")
+func TestOpenFileNotFound(t *testing.T) {
+	_, err := Open("nonexistent.yaml")
 	if err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestCheckReloadNoChange(t *testing.T) {
+	ddb := openTestDB(t)
+
+	reloaded, err := ddb.CheckReload()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reloaded {
+		t.Error("expected no reload when file unchanged")
+	}
+}
+
+func TestCheckReloadAfterChange(t *testing.T) {
+	// Copy testdata to a temp file so we can modify it
+	src, err := os.ReadFile(testDBPath)
+	if err != nil {
+		t.Fatalf("reading test db: %v", err)
+	}
+
+	tmp, err := os.CreateTemp(t.TempDir(), "tocalls-*.yaml")
+	if err != nil {
+		t.Fatalf("creating temp file: %v", err)
+	}
+	if _, err := tmp.Write(src); err != nil {
+		t.Fatalf("writing temp file: %v", err)
+	}
+	tmp.Close()
+
+	ddb, err := Open(tmp.Name())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Verify initial load works
+	p := &fap.Packet{DstCallsign: "APZMDR", Format: fap.FormatUncompressed}
+	did, _, err := ddb.Identify(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if did.Model != "HaMDR" {
+		t.Fatalf("model = %q, want %q", did.Model, "HaMDR")
+	}
+
+	// Rewrite the file (new inode via rename) with modified content
+	modified := []byte(`tocalls:
+ - tocall: APZMDR
+   vendor: Test Vendor
+   model: Test Model
+   class: tracker
+`)
+	tmp2, err := os.CreateTemp(t.TempDir(), "tocalls-new-*.yaml")
+	if err != nil {
+		t.Fatalf("creating temp file: %v", err)
+	}
+	if _, err := tmp2.Write(modified); err != nil {
+		t.Fatalf("writing temp file: %v", err)
+	}
+	tmp2.Close()
+	os.Rename(tmp2.Name(), tmp.Name())
+
+	reloaded, err := ddb.CheckReload()
+	if err != nil {
+		t.Fatalf("CheckReload error: %v", err)
+	}
+	if !reloaded {
+		t.Error("expected reload after file change")
+	}
+
+	// Verify new data is active
+	did, _, err = ddb.Identify(p)
+	if err != nil {
+		t.Fatalf("unexpected error after reload: %v", err)
+	}
+	if did.Model != "Test Model" {
+		t.Errorf("model after reload = %q, want %q", did.Model, "Test Model")
 	}
 }
