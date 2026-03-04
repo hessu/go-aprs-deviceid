@@ -193,10 +193,15 @@ func (ddb *DeviceDB) load() error {
 }
 
 // CheckReload checks whether the database file has changed (by comparing
-// inode and mtime) and reloads it if so. Returns true if the database was
+// inode and mtime) and reloads it if so. An optional path argument switches
+// the database to a different YAML file. Returns true if the database was
 // reloaded. It is safe to call from a single goroutine while other
 // goroutines call Identify concurrently.
-func (ddb *DeviceDB) CheckReload() (bool, error) {
+func (ddb *DeviceDB) CheckReload(path ...string) (bool, error) {
+	if len(path) > 0 && path[0] != "" {
+		ddb.path = path[0]
+	}
+
 	var st syscall.Stat_t
 	if err := syscall.Stat(ddb.path, &st); err != nil {
 		return false, fmt.Errorf("stat %s: %w", ddb.path, err)

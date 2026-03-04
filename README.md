@@ -48,8 +48,8 @@ import (
 )
 
 func main() {
-    // Load the device identification database
-    db, err := deviceid.LoadDB("tocalls.yaml")
+    // Open the device identification database
+    db, err := deviceid.Open("tocalls.yaml")
     if err != nil {
         fmt.Printf("Error loading DB: %v\n", err)
         return
@@ -75,6 +75,29 @@ func main() {
     fmt.Printf("Version: %s\n", did.Version)
     fmt.Printf("Comment: %s\n", comment)
 }
+```
+
+## Hot-reloading
+
+The `DeviceDB` is concurrency-safe. You can call `Identify` from multiple
+goroutines simultaneously. To pick up changes to the `tocalls.yaml` file
+without restarting, call `CheckReload` periodically from a single goroutine:
+
+```go
+reloaded, err := db.CheckReload()
+if err != nil {
+    log.Printf("Reload error: %v", err)
+} else if reloaded {
+    log.Println("Database reloaded")
+}
+```
+
+`CheckReload` compares the file's inode and mtime and only reparses when
+the file has actually changed. You can optionally pass a new path to switch
+to a different YAML file:
+
+```go
+reloaded, err := db.CheckReload("/new/path/tocalls.yaml")
 ```
 
 ## Device identification database

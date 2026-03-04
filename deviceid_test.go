@@ -397,3 +397,54 @@ func TestCheckReloadAfterChange(t *testing.T) {
 		t.Errorf("model after reload = %q, want %q", did.Model, "Test Model")
 	}
 }
+
+func TestCheckReloadWithNewPath(t *testing.T) {
+	ddb := openTestDB(t)
+
+	// Verify initial data
+	p := &fap.Packet{DstCallsign: "APZMDR", Format: fap.FormatUncompressed}
+	did, _, err := ddb.Identify(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if did.Model != "HaMDR" {
+		t.Fatalf("model = %q, want %q", did.Model, "HaMDR")
+	}
+
+	// Write a different database to a new file
+	modified := []byte(`tocalls:
+ - tocall: APZMDR
+   vendor: New Vendor
+   model: New Model
+   class: software
+`)
+	tmp, err := os.CreateTemp(t.TempDir(), "tocalls-alt-*.yaml")
+	if err != nil {
+		t.Fatalf("creating temp file: %v", err)
+	}
+	if _, err := tmp.Write(modified); err != nil {
+		t.Fatalf("writing temp file: %v", err)
+	}
+	tmp.Close()
+
+	// Reload with different path
+	reloaded, err := ddb.CheckReload(tmp.Name())
+	if err != nil {
+		t.Fatalf("CheckReload error: %v", err)
+	}
+	if !reloaded {
+		t.Error("expected reload when switching to new path")
+	}
+
+	// Verify new data
+	did, _, err = ddb.Identify(p)
+	if err != nil {
+		t.Fatalf("unexpected error after reload: %v", err)
+	}
+	if did.Model != "New Model" {
+		t.Errorf("model after reload = %q, want %q", did.Model, "New Model")
+	}
+	if did.Vendor != "New Vendor" {
+		t.Errorf("vendor after reload = %q, want %q", did.Vendor, "New Vendor")
+	}
+}
