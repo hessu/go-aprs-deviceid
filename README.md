@@ -4,7 +4,7 @@ APRS device identifier - Go edition
 
 This is a Go port of the
 [Ham::APRS::DeviceID](https://github.com/hessu/perl-aprs-deviceid) Perl
-module. It identifies the manufacturer, model and software version of an
+module. It identifies the manufacturer and model of an
 APRS transmitter by examining a parsed APRS packet (as provided by
 [go-aprs-fap](https://github.com/hessu/go-aprs-fap)) and looking up the
 device in the [tocalls.yaml](https://github.com/aprsorg/aprs-deviceid)
@@ -18,8 +18,7 @@ has been retained in the Go implementation.
 
 ## Identification methods
 
-- **Tocall matching**: exact and wildcard destination callsign patterns,
-  with software version extraction from wildcard portions
+- **Tocall matching**: exact and wildcard destination callsign patterns
 - **Mic-E legacy devices**: Kenwood TH-D7A, TH-D72, TH-D74, TM-D700,
   TM-D710 (identified by comment prefix/suffix)
 - **Mic-E new-style suffix codes**: Yaesu, Byonics, Anytone, and other
@@ -72,7 +71,6 @@ func main() {
 
     fmt.Printf("Vendor: %s\n", did.Vendor)
     fmt.Printf("Model: %s\n", did.Model)
-    fmt.Printf("Version: %s\n", did.Version)
     fmt.Printf("Comment: %s\n", comment)
 }
 ```
