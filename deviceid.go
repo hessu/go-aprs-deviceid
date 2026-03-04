@@ -308,7 +308,7 @@ func (ddb *DeviceDB) Identify(p *fap.Packet) (*DeviceID, string, error) {
 }
 
 func (d *db) identify(p *fap.Packet) (*DeviceID, string, error) {
-	if p.Format == "" && p.DstCallsign == "" {
+	if p.Format == "" || p.DstCallsign == "" {
 		return nil, p.Comment, fmt.Errorf("packet has no format or destination callsign")
 	}
 
