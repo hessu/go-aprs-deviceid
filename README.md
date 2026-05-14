@@ -75,6 +75,23 @@ func main() {
 }
 ```
 
+## Identifying by destination callsign only
+
+If you already have a destination callsign (tocall) and don't need Mic-E
+comment-based identification, use `IdentifyTocall`:
+
+```go
+did, err := db.IdentifyTocall("APDR15")
+if err != nil {
+    fmt.Printf("Unknown device: %v\n", err)
+    return
+}
+fmt.Printf("Vendor: %s, Model: %s\n", did.Vendor, did.Model)
+```
+
+This skips Mic-E legacy and suffix-code matching, so it cannot distinguish
+specific Mic-E devices like a Kenwood TH-D74 from a generic Mic-E tocall.
+
 ## Hot-reloading
 
 The `DeviceDB` is concurrency-safe. You can call `Identify` from multiple

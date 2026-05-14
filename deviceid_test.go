@@ -313,6 +313,34 @@ func TestMicEFallbackToTocall(t *testing.T) {
 	}
 }
 
+func TestIdentifyTocall(t *testing.T) {
+	ddb := openTestDB(t)
+
+	did, err := ddb.IdentifyTocall("APZMDR")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if did.Model != "HaMDR" {
+		t.Errorf("model = %q, want %q", did.Model, "HaMDR")
+	}
+
+	did, err = ddb.IdentifyTocall("APD123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if did.Model != "aprsd" {
+		t.Errorf("model = %q, want %q", did.Model, "aprsd")
+	}
+
+	if _, err := ddb.IdentifyTocall("ZZZZZ9"); !errors.Is(err, ErrNoMatch) {
+		t.Errorf("expected ErrNoMatch, got %v", err)
+	}
+
+	if _, err := ddb.IdentifyTocall(""); err == nil {
+		t.Error("expected error for empty callsign")
+	}
+}
+
 func TestOpenFileNotFound(t *testing.T) {
 	_, err := Open("nonexistent.yaml")
 	if err == nil {

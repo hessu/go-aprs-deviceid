@@ -322,13 +322,34 @@ func (d *db) identify(p *fap.Packet) (*DeviceID, string, error) {
 		}
 	}
 
-	// Exact tocall match
-	if did, ok := d.fixedTocalls[p.DstCallsign]; ok {
+	if did := d.lookupTocall(p.DstCallsign); did != nil {
 		return did, comment, nil
 	}
 
-	// Wildcard tocall match - try prefix lengths 5, 4, 3, 2
-	dst := p.DstCallsign
+	return nil, comment, ErrNoMatch
+}
+
+// IdentifyTocall looks up a device by destination callsign (tocall) alone,
+// without requiring a parsed packet. Mic-E comment-based identification is
+// not performed. Returns ErrNoMatch if no match is found.
+// It is safe to call concurrently from multiple goroutines.
+func (ddb *DeviceDB) IdentifyTocall(dstCallsign string) (*DeviceID, error) {
+	if dstCallsign == "" {
+		return nil, fmt.Errorf("empty destination callsign")
+	}
+	if did := ddb.db.Load().lookupTocall(dstCallsign); did != nil {
+		return did, nil
+	}
+	return nil, ErrNoMatch
+}
+
+// lookupTocall returns the DeviceID for an exact or wildcard tocall match,
+// or nil if no match. Does not handle Mic-E identification.
+func (d *db) lookupTocall(dst string) *DeviceID {
+	if did, ok := d.fixedTocalls[dst]; ok {
+		return did
+	}
+
 	for plen := 5; plen >= 2; plen-- {
 		if plen > len(dst) {
 			continue
@@ -337,13 +358,12 @@ func (d *db) identify(p *fap.Packet) (*DeviceID, string, error) {
 		if wts, ok := d.wildcardTocalls[prefix]; ok {
 			for i := range wts {
 				if matchWildcard(wts[i].pattern, dst) {
-					return wts[i].id, comment, nil
+					return wts[i].id
 				}
 			}
 		}
 	}
-
-	return nil, comment, ErrNoMatch
+	return nil
 }
 
 func (d *db) identifyMicE(p *fap.Packet) (*DeviceID, string) {
