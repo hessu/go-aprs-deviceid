@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync/atomic"
-	"syscall"
+	"time"
 
 	"github.com/hessu/go-aprs-fap"
 	"gopkg.in/yaml.v3"
@@ -32,10 +32,10 @@ type DeviceID struct {
 // from any number of goroutines. Call CheckReload periodically to
 // pick up changes to the underlying YAML file.
 type DeviceDB struct {
-	path string
-	ino  uint64
-	mtime syscall.Timespec
-	db   atomic.Pointer[db]
+	path  string
+	ino   uint64
+	mtime time.Time
+	db    atomic.Pointer[db]
 }
 
 // db holds the parsed tocalls.yaml lookup structures. Immutable after construction.
@@ -92,8 +92,8 @@ type yamlMiceLegacy struct {
 }
 
 type yamlFile struct {
-	Tocalls    []yamlTocall    `yaml:"tocalls"`
-	Mice       []yamlMice      `yaml:"mice"`
+	Tocalls    []yamlTocall     `yaml:"tocalls"`
+	Mice       []yamlMice       `yaml:"mice"`
 	MiceLegacy []yamlMiceLegacy `yaml:"micelegacy"`
 }
 
@@ -176,8 +176,8 @@ func Open(yamlPath string) (*DeviceDB, error) {
 // load reads and parses the YAML file, updates the stored inode/mtime,
 // and atomically swaps in the new db.
 func (ddb *DeviceDB) load() error {
-	var st syscall.Stat_t
-	if err := syscall.Stat(ddb.path, &st); err != nil {
+	fi, err := os.Stat(ddb.path)
+	if err != nil {
 		return fmt.Errorf("stat %s: %w", ddb.path, err)
 	}
 
@@ -186,8 +186,8 @@ func (ddb *DeviceDB) load() error {
 		return err
 	}
 
-	ddb.ino = st.Ino
-	ddb.mtime = st.Mtim
+	ddb.ino = inode(fi)
+	ddb.mtime = fi.ModTime()
 	ddb.db.Store(d)
 	return nil
 }
@@ -202,12 +202,12 @@ func (ddb *DeviceDB) CheckReload(path ...string) (bool, error) {
 		ddb.path = path[0]
 	}
 
-	var st syscall.Stat_t
-	if err := syscall.Stat(ddb.path, &st); err != nil {
+	fi, err := os.Stat(ddb.path)
+	if err != nil {
 		return false, fmt.Errorf("stat %s: %w", ddb.path, err)
 	}
 
-	if st.Ino == ddb.ino && st.Mtim == ddb.mtime {
+	if inode(fi) == ddb.ino && fi.ModTime().Equal(ddb.mtime) {
 		return false, nil
 	}
 
