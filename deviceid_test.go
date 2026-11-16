@@ -271,8 +271,74 @@ func TestMicECommentStripping(t *testing.T) {
 	if did.Model != "TinyTrak4" {
 		t.Errorf("model = %q, want %q", did.Model, "TinyTrak4")
 	}
-	if comment != "`hello world" {
-		t.Errorf("stripped comment = %q, want %q", comment, "`hello world")
+	if comment != "hello world" {
+		t.Errorf("stripped comment = %q, want %q", comment, "hello world")
+	}
+}
+
+func TestMicENewStyleComment(t *testing.T) {
+	ddb := openTestDB(t)
+
+	tests := []struct {
+		name      string
+		comment   string
+		vendor    string
+		model     string
+		messaging bool
+		want      string
+	}{
+		{"backtick prefix", "`hello world_(", "Yaesu", "FT2D", true, "hello world"},
+		{"quote prefix", "'hello world|4", "Byonics", "TinyTrak4", false, "hello world"},
+		{"code only", "`_(", "Yaesu", "FT2D", true, ""},
+		{"VX-8", "`hello_ ", "Yaesu", "VX-8", true, "hello"},
+		{"VX-8 trailing space eaten", "`hello_", "Yaesu", "VX-8", true, "hello"},
+		{"VX-8 extra whitespace", "`hello_  \t", "Yaesu", "VX-8", true, "hello"},
+		{"unknown code backtick", "`hello world??", "Unknown", "Other Mic-E", true, "hello world??"},
+		{"unknown code quote", "'hello world??", "Unknown", "Other Mic-E", false, "hello world??"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &fap.Packet{
+				Format:      fap.FormatMicE,
+				DstCallsign: "DUMMY",
+				Comment:     tc.comment,
+			}
+
+			did, comment, err := ddb.Identify(p)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if did.Vendor != tc.vendor || did.Model != tc.model {
+				t.Errorf("device = %q %q, want %q %q", did.Vendor, did.Model, tc.vendor, tc.model)
+			}
+			if did.Messaging != tc.messaging {
+				t.Errorf("messaging = %v, want %v", did.Messaging, tc.messaging)
+			}
+			if comment != tc.want {
+				t.Errorf("comment = %q, want %q", comment, tc.want)
+			}
+		})
+	}
+}
+
+func TestMicENewStyleRequiresPrefix(t *testing.T) {
+	ddb := openTestDB(t)
+
+	// A type code suffix without the '`' or '\'' prefix is not a type code
+	for _, c := range []string{"hello world|4", "hello_ ", "`|", "'"} {
+		p := &fap.Packet{
+			Format:      fap.FormatMicE,
+			DstCallsign: "DUMMY",
+			Comment:     c,
+		}
+		did, comment, err := ddb.Identify(p)
+		if !errors.Is(err, ErrNoMatch) {
+			t.Errorf("%q: expected ErrNoMatch, got %v (%+v)", c, err, did)
+		}
+		if comment != c {
+			t.Errorf("%q: comment modified to %q", c, comment)
+		}
 	}
 }
 
@@ -293,23 +359,27 @@ func TestNoMatch(t *testing.T) {
 	}
 }
 
-func TestMicEFallbackToTocall(t *testing.T) {
+func TestMicENoTocallFallback(t *testing.T) {
 	ddb := openTestDB(t)
 
-	// Mic-E format but comment doesn't match any Mic-E device code;
-	// should fall back to tocall matching
+	// Mic-E format but comment doesn't match any Mic-E device code; the
+	// destination callsign encodes latitude and must not be looked up
+	// as a tocall, even if it happens to match one.
 	p := &fap.Packet{
 		Format:      fap.FormatMicE,
 		DstCallsign: "APZMDR",
 		Comment:     "xy",
 	}
 
-	did, _, err := ddb.Identify(p)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	did, comment, err := ddb.Identify(p)
+	if !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("expected ErrNoMatch, got %v", err)
 	}
-	if did.Model != "HaMDR" {
-		t.Errorf("model = %q, want %q", did.Model, "HaMDR")
+	if did != nil {
+		t.Errorf("expected nil DeviceID, got %+v", did)
+	}
+	if comment != "xy" {
+		t.Errorf("comment modified to %q", comment)
 	}
 }
 

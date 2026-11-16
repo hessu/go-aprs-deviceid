@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,13 @@ import (
 
 // ErrNoMatch is returned when no device match is found for a packet.
 var ErrNoMatch = errors.New("no device match")
+
+// unknownMicE is returned for new-style Mic-E packets which have the
+// backtick or apostrophe prefix but an unrecognised type code suffix.
+var (
+	unknownMicE    = DeviceID{Vendor: "Unknown", Model: "Other Mic-E"}
+	unknownMicEMsg = DeviceID{Vendor: "Unknown", Model: "Other Mic-E", Messaging: true}
+)
 
 // DeviceID holds the identified device information.
 type DeviceID struct {
@@ -314,12 +322,14 @@ func (d *db) identify(p *fap.Packet) (*DeviceID, string, error) {
 
 	comment := p.Comment
 
-	// Mic-E format
+	// Mic-E format: the destination callsign carries the latitude, not a
+	// tocall, so only the comment type codes can identify the device.
 	if p.Format == fap.FormatMicE {
 		did, updatedComment := d.identifyMicE(p)
 		if did != nil {
 			return did, updatedComment, nil
 		}
+		return nil, comment, ErrNoMatch
 	}
 
 	if did := d.lookupTocall(p.DstCallsign); did != nil {
@@ -392,16 +402,37 @@ func (d *db) identifyMicE(p *fap.Packet) (*DeviceID, string) {
 		return leg.id, comment[1:]
 	}
 
-	// Try new-style Mic-E: 2-char suffix lookup
-	if len(comment) >= 2 {
-		suffix := comment[len(comment)-2:]
-		if ids, ok := d.miceCodes[suffix]; ok {
-			if first == '`' {
-				return &ids.withMsg, comment[:len(comment)-2]
+	// New-style Mic-E: a '`' (messaging capable) or '\'' (not) prefix
+	// and a 2-char type code suffix. Both are stripped from the comment.
+	if first != '`' && first != '\'' {
+		return nil, comment
+	}
+
+	// Yaesu VX-8 has a space as the last character, which commonly gets
+	// eaten by UI-View, so match it with a relaxed rule.
+	if first == '`' {
+		if ids, ok := d.miceCodes["_ "]; ok {
+			body := strings.TrimRight(comment[1:], " \t\r\n\f\v")
+			if strings.HasSuffix(body, "_") {
+				return &ids.withMsg, body[:len(body)-1]
 			}
-			return &ids.withoutMsg, comment[:len(comment)-2]
 		}
 	}
 
-	return nil, comment
+	if len(comment) < 3 {
+		return nil, comment
+	}
+	suffix := comment[len(comment)-2:]
+	if ids, ok := d.miceCodes[suffix]; ok {
+		if first == '`' {
+			return &ids.withMsg, comment[1 : len(comment)-2]
+		}
+		return &ids.withoutMsg, comment[1 : len(comment)-2]
+	}
+
+	// Prefix present but type code unknown: strip the prefix only.
+	if first == '`' {
+		return &unknownMicEMsg, comment[1:]
+	}
+	return &unknownMicE, comment[1:]
 }
